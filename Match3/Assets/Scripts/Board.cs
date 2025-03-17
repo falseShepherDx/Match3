@@ -14,6 +14,7 @@ public class Board : MonoBehaviour
 
     public int width => Tiles.GetLength(0);
     public int height => Tiles.GetLength(1);
+    public RectTransform[] spawners;
 
     // private readonly List<Tile> _selection = new List<Tile>();
     public Tile SelectedTile { get; private set; }
@@ -28,33 +29,44 @@ public class Board : MonoBehaviour
 
     private void Start()
     {
-        
-            Tiles = new Tile[rows.Max(row => row.tiles.Length), rows.Length];
+        int height = rows.Length;
+        int width = rows[0].tiles.Length;
 
-            for (int y = 0; y < height; y++)
+        Tiles = new Tile[width, height];
+
+        for (int y = 0; y < height; y++)
+        {
+            if (rows[y].tiles.Length != width)
             {
-                for (int x = 0; x < width; x++)
-                {
-                    Tile tile = rows[y].tiles[x];
-
-                    tile.x = x;
-                    tile.y = y;
-                    tile.Item = ItemDataBase.Items[UnityEngine.Random.Range(0, ItemDataBase.Items.Length)];
-                    Tiles[x, y] = tile;
-                }
+                Debug.LogError($"Row {y} has incorrect tile count!");
+                continue;
             }
-        if(CanPop())
+
+            for (int x = 0; x < width; x++)
+            {
+                Tile tile = rows[y].tiles[x];
+
+                tile.x = x;
+                tile.y = y;
+
+                
+                tile.InitializeItem(ItemDataBase.Items[UnityEngine.Random.Range(0, ItemDataBase.Items.Length)]);
+
+                Tiles[x, y] = tile;
+            }
+        }
+
+        if (CanPop())
         {
             Pop();
         }
-        
     }
- 
+
 
 
     public async void Select(Tile tile)
     {
-        
+
         if (SelectedTile == null)
         {
             SelectedTile = tile;
@@ -70,6 +82,7 @@ public class Board : MonoBehaviour
         Debug.Log($"Swapping tiles at ({SelectedTile.x},{SelectedTile.y}) and ({tile.x},{tile.y})");
 
         await Swap(SelectedTile, tile);
+
 
         if (CanPop())
         {
@@ -127,33 +140,112 @@ public class Board : MonoBehaviour
     }
     private async void Pop()
     {
-
-        for (var y = 0; y < height; y++)
+        bool hasMatch;
+        do
         {
-            for (var x = 0; x < width; x++)
+            hasMatch = false;
+            HashSet<Tile> tilesToPop = new HashSet<Tile>();
+
+            for (int y = 0; y < height; y++)
             {
-                var tile = Tiles[x, y];
-                var connectedTiles = tile.GetConnectedTiles();
-                if (connectedTiles.Skip(1).Count() < 2) continue;
-
-                Sequence deflateSequence = DOTween.Sequence();
-                foreach (var connectedTile in connectedTiles)
+                for (int x = 0; x < width; x++)
                 {
-                    deflateSequence.Join(connectedTile.icon.transform.DOScale(Vector3.zero, tweenDuration));
+                    var connectedTiles = Tiles[x, y].GetConnectedTiles();
+
+                    if (connectedTiles.Count >= 3)
+                    {
+                        hasMatch = true;
+                        tilesToPop.UnionWith(connectedTiles);
+                    }
                 }
-                await deflateSequence.Play().AsyncWaitForCompletion();
+            }
 
-                var inflateSequence = DOTween.Sequence();
+            if (hasMatch)
+            {
+                Sequence popSequence = DOTween.Sequence();
 
-                foreach (var connectedTile in connectedTiles)
+                foreach (var tile in tilesToPop)
                 {
-                    connectedTile.Item = ItemDataBase.Items[UnityEngine.Random.Range(0, ItemDataBase.Items.Length)];
+                    Sequence singleTileSequence = DOTween.Sequence();
 
-                    inflateSequence.Join(connectedTile.icon.transform.DOScale(Vector3.one, tweenDuration));
+                    singleTileSequence
+                        .Append(tile.icon.transform.DOScale(1.3f, 0.1f).SetEase(Ease.OutQuad))
+                        .Append(tile.icon.transform.DOScale(0f, 0.2f).SetEase(Ease.InBack))
+                        .OnComplete(() => tile.Item = null);
+
+                    popSequence.Join(singleTileSequence);
                 }
-                await inflateSequence.Play().AsyncWaitForCompletion();
+
+                await popSequence.Play().AsyncWaitForCompletion();
+
+                await ApplyGravity();
+                await SpawnNewTiles();
+            }
+
+        } while (hasMatch);
+    }
+
+    private async Task ApplyGravity()
+    {
+        bool moved;
+        do
+        {
+            moved = false;
+            Sequence gravitySequence = DOTween.Sequence();
+
+            for (int x = 0; x < width; x++)
+            {
+                for (int y = height - 1; y > 0; y--)
+                {
+                    if (Tiles[x, y].Item == null && Tiles[x, y - 1].Item != null)
+                    {
+                        // visual changes
+                        Tiles[x, y].Item = Tiles[x, y - 1].Item;
+                        Tiles[x, y - 1].Item = null;
+
+                        var iconTransform = Tiles[x, y].icon.transform;
+                        var startPos = Tiles[x, y - 1].transform.position;
+                        var endPos = Tiles[x, y].transform.position;
+
+                        iconTransform.position = startPos;
+
+                        //smoother gravity fall
+                        gravitySequence.Join(iconTransform.DOMove(endPos, 0.3f).SetEase(Ease.InQuad));
+
+                        moved = true;
+                    }
+                }
+            }
+
+            if (moved)
+                await gravitySequence.Play().AsyncWaitForCompletion();
+
+        } while (moved);
+    }
+    private async Task SpawnNewTiles()
+    {
+        Sequence sequence = DOTween.Sequence();
+
+        for (int x = 0; x < width; x++)
+        {
+            for (int y = 0; y < height; y++)
+            {
+                if (Tiles[x, y].Item == null)
+                {
+                    Tiles[x, y].SetItemAnimated(ItemDataBase.Items[UnityEngine.Random.Range(0, ItemDataBase.Items.Length)]);
+                    Tiles[x, y].icon.transform.position = spawners[x].position;
+                    Tiles[x, y].icon.transform.localScale = Vector3.one;
+
+                    sequence.Join(Tiles[x, y].icon.transform.DOMove(Tiles[x, y].transform.position, 0.5f).SetEase(Ease.OutQuad));
+                }
             }
         }
 
+        await sequence.Play().AsyncWaitForCompletion();
+
+       
     }
+
+   
+
 }
